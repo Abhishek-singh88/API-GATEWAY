@@ -1,0 +1,11 @@
+{
+  "workspaces": [
+    "packages/*",
+    "shared"
+  ],
+  "scripts": {
+    "db:start": "docker compose -f infra/docker-compose.yml up -d",
+    "db:stop": "docker compose -f infra/docker-compose.yml down",
+    "db:logs": "docker compose -f infra/docker-compose.yml logs -f"
+  }
+}
