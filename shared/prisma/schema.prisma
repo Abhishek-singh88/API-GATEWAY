@@ -1,0 +1,28 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  role         String   @default("user")
+  createdAt    DateTime @default(now())
+  
+  resources    Resource[]  // Link to resources
+}
+
+model Resource {
+  id          String   @id @default(cuid())
+  ownerId     String
+  originalUrl String
+  shortCode   String   @unique
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime?
+  
+  owner       User     @relation(fields: [ownerId], references: [id])
+}
