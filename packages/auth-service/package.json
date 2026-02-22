@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "nodemon",
     "db:migrate": "prisma migrate dev --name init",
-    "db:generate": "prisma generate"
+    "db:generate": "prisma generate",
+    "db:push": "prisma db push"
   },
   "keywords": [],
   "author": "",
