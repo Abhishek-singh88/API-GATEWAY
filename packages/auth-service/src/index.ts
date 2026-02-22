@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import dotenv from 'dotenv';
@@ -15,7 +15,13 @@ if (!connectionString) {
   throw new Error('DATABASE_URL is required');
 }
 
-const pool = new Pool({ connectionString });
+const databaseUrl = new URL(connectionString);
+const schema = databaseUrl.searchParams.get('schema') ?? 'public';
+databaseUrl.searchParams.delete('schema');
+const pool = new Pool({
+  connectionString: databaseUrl.toString(),
+  options: `-c search_path=${schema}`,
+});
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
@@ -31,6 +37,10 @@ const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET as string;
 app.post('/api/v1/auth/register', async (req, res) => {
   try {
     const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+
     const passwordHash = await bcrypt.hash(password, 12);
 
     const user = await prisma.user.create({
@@ -39,7 +49,18 @@ app.post('/api/v1/auth/register', async (req, res) => {
 
     res.json({ message: 'User created', userId: user.id });
   } catch (error) {
-    res.status(400).json({ error: 'Email exists' });
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      if (error.code === 'P2002') {
+        return res.status(409).json({ error: 'Email exists' });
+      }
+
+      if (error.code === 'P2021') {
+        return res.status(500).json({ error: 'User table is missing. Run auth-service Prisma migration.' });
+      }
+    }
+
+    console.error('Register error:', error);
+    res.status(500).json({ error: 'Registration failed' });
   }
 });
 
@@ -67,10 +88,11 @@ app.post('/api/v1/auth/login', async (req, res) => {
 
     res.json({ token, refreshToken });
   } catch (error) {
+    console.error('Login error:', error);
     res.status(500).json({ error: 'Login failed' });
   }
 });
 
 app.listen(PORT, () => {
-  console.log(`Auth service on port ${PORT}`);
+  console.log(`Auth service on port ${PORT} (schema=${schema})`);
 });
