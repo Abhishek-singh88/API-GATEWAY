@@ -75,7 +75,7 @@ app.post('/api/v1/auth/login', async (req, res) => {
     }
 
     const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
+      { userId: user.id, email: user.email, role: user.role, roles: [user.role] },
       JWT_SECRET,
       { expiresIn: '15m' }
     );
@@ -90,6 +90,42 @@ app.post('/api/v1/auth/login', async (req, res) => {
   } catch (error) {
     console.error('Login error:', error);
     res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+// POST /api/v1/auth/refresh
+app.post('/api/v1/auth/refresh', async (req, res) => {
+  try {
+    const { refreshToken } = req.body;
+    if (!refreshToken) {
+      return res.status(400).json({ error: 'refreshToken is required' });
+    }
+
+    const decoded = jwt.verify(refreshToken, REFRESH_SECRET) as { userId?: string };
+    if (!decoded.userId) {
+      return res.status(401).json({ error: 'Invalid refresh token' });
+    }
+
+    const user = await prisma.user.findUnique({ where: { id: decoded.userId } });
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid refresh token' });
+    }
+
+    const token = jwt.sign(
+      { userId: user.id, email: user.email, role: user.role, roles: [user.role] },
+      JWT_SECRET,
+      { expiresIn: '15m' }
+    );
+
+    const newRefreshToken = jwt.sign(
+      { userId: user.id },
+      REFRESH_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    res.json({ token, refreshToken: newRefreshToken });
+  } catch (error) {
+    return res.status(401).json({ error: 'Invalid or expired refresh token' });
   }
 });
 
