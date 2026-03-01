@@ -2,6 +2,8 @@ import express from 'express';
 import cors from 'cors';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
+import { connect } from 'amqplib';
+import type { Channel } from 'amqplib';
 import { Prisma, PrismaClient } from '@prisma/client';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
@@ -26,12 +28,55 @@ const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 
 const PORT = process.env.PORT || 3001;
+const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://guest:guest@localhost:5672';
+const AUDIT_QUEUE = process.env.AUDIT_EVENTS_QUEUE || 'audit_events';
+const SERVICE_NAME = 'auth-service';
 
 app.use(cors());
 app.use(express.json());
 
 const JWT_SECRET = process.env.JWT_SECRET as string;
 const REFRESH_SECRET = process.env.JWT_REFRESH_SECRET as string;
+let auditChannel: Channel | null = null;
+
+type AuditEvent = {
+  type: string;
+  actorId: string | null;
+  service: string;
+  payload: Record<string, unknown>;
+  timestamp: string;
+};
+
+async function initAuditPublisher() {
+  try {
+    const connection = await connect(RABBITMQ_URL);
+    connection.on('error', (error: unknown) => {
+      console.error('RabbitMQ connection error:', error);
+      auditChannel = null;
+    });
+    connection.on('close', () => {
+      auditChannel = null;
+    });
+
+    auditChannel = await connection.createChannel();
+    await auditChannel.assertQueue(AUDIT_QUEUE, { durable: true });
+    console.log(`Audit publisher ready on queue "${AUDIT_QUEUE}"`);
+  } catch (error) {
+    console.error('Failed to initialize audit publisher:', error);
+  }
+}
+
+function publishAuditEvent(event: AuditEvent) {
+  if (!auditChannel) {
+    return;
+  }
+
+  auditChannel.sendToQueue(
+    AUDIT_QUEUE,
+    Buffer.from(JSON.stringify(event)),
+    { persistent: true }
+  );
+}
 
 // POST /api/v1/auth/register
 app.post('/api/v1/auth/register', async (req, res) => {
@@ -45,6 +90,14 @@ app.post('/api/v1/auth/register', async (req, res) => {
 
     const user = await prisma.user.create({
       data: { email, passwordHash }
+    });
+
+    publishAuditEvent({
+      type: 'USER_REGISTERED',
+      actorId: user.id,
+      service: SERVICE_NAME,
+      payload: { email: user.email },
+      timestamp: new Date().toISOString(),
     });
 
     res.json({ message: 'User created', userId: user.id });
@@ -85,6 +138,14 @@ app.post('/api/v1/auth/login', async (req, res) => {
       REFRESH_SECRET,
       { expiresIn: '7d' }
     );
+
+    publishAuditEvent({
+      type: 'USER_LOGGED_IN',
+      actorId: user.id,
+      service: SERVICE_NAME,
+      payload: { email: user.email },
+      timestamp: new Date().toISOString(),
+    });
 
     res.json({ token, refreshToken });
   } catch (error) {
@@ -131,4 +192,5 @@ app.post('/api/v1/auth/refresh', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Auth service on port ${PORT} (schema=${schema})`);
+  void initAuditPublisher();
 });
