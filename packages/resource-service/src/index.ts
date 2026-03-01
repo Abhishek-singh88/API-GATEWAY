@@ -1,6 +1,8 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import { connect } from 'amqplib';
+import type { Channel } from 'amqplib';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { Pool } from 'pg';
 import { PrismaClient } from '../generated/prisma/index.js';
@@ -23,9 +25,53 @@ const pool = new Pool({
 const adapter = new PrismaPg(pool);
 const prisma = new PrismaClient({ adapter });
 const PORT = process.env.PORT || 3002;
+const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://guest:guest@localhost:5672';
+const AUDIT_QUEUE = process.env.AUDIT_EVENTS_QUEUE || 'audit_events';
+const SERVICE_NAME = 'resource-service';
 
 app.use(cors());
 app.use(express.json());
+
+let auditChannel: Channel | null = null;
+
+type AuditEvent = {
+  type: string;
+  actorId: string | null;
+  service: string;
+  payload: Record<string, unknown>;
+  timestamp: string;
+};
+
+async function initAuditPublisher() {
+  try {
+    const connection = await connect(RABBITMQ_URL);
+    connection.on('error', (error: unknown) => {
+      console.error('RabbitMQ connection error:', error);
+      auditChannel = null;
+    });
+    connection.on('close', () => {
+      auditChannel = null;
+    });
+
+    auditChannel = await connection.createChannel();
+    await auditChannel.assertQueue(AUDIT_QUEUE, { durable: true });
+    console.log(`Audit publisher ready on queue "${AUDIT_QUEUE}"`);
+  } catch (error) {
+    console.error('Failed to initialize audit publisher:', error);
+  }
+}
+
+function publishAuditEvent(event: AuditEvent) {
+  if (!auditChannel) {
+    return;
+  }
+
+  auditChannel.sendToQueue(
+    AUDIT_QUEUE,
+    Buffer.from(JSON.stringify(event)),
+    { persistent: true }
+  );
+}
 
 // POST /api/v1/resources - Create short URL
 app.post('/api/v1/resources', async (req, res) => {
@@ -39,6 +85,18 @@ app.post('/api/v1/resources', async (req, res) => {
         originalUrl,
         shortCode
       }
+    });
+
+    publishAuditEvent({
+      type: 'RESOURCE_CREATED',
+      actorId: ownerId ?? null,
+      service: SERVICE_NAME,
+      payload: {
+        resourceId: resource.id,
+        shortCode: resource.shortCode,
+        originalUrl: resource.originalUrl,
+      },
+      timestamp: new Date().toISOString(),
     });
     
     res.json({
@@ -91,4 +149,5 @@ app.get('/health', (req, res) => res.json({ status: 'ok', service: 'resource' })
 
 app.listen(PORT, () => {
   console.log(`Resource service on port ${PORT}`);
+  void initAuditPublisher();
 });
