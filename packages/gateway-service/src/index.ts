@@ -112,24 +112,24 @@ async function rateLimit(req: AuthedRequest, res: express.Response, next: expres
     return res.status(500).json({ error: 'Rate limit store unavailable' });
   }
 
-  for (let i = 0; i < keys.length; i++) {
+  for (const [i, entry] of keys.entries()) {
     const incrIndex = i * 2;
     const ttlIndex = i * 2 + 1;
 
     const count = Number(results[incrIndex]?.[1] ?? 0);
     let ttl = Number(results[ttlIndex]?.[1] ?? -1);
     if (ttl < 0) {
-      await redis.expire(keys[i].key, windowSec);
+      await redis.expire(entry.key, windowSec);
       ttl = windowSec;
     }
 
-    const remaining = Math.max(keys[i].limit - count, 0);
-    res.setHeader('X-RateLimit-Limit', String(keys[i].limit));
+    const remaining = Math.max(entry.limit - count, 0);
+    res.setHeader('X-RateLimit-Limit', String(entry.limit));
     res.setHeader('X-RateLimit-Remaining', String(remaining));
     res.setHeader('X-RateLimit-Reset', String(ttl));
-    res.setHeader('X-RateLimit-Scope', keys[i].scope);
+    res.setHeader('X-RateLimit-Scope', entry.scope);
 
-    if (count > keys[i].limit) {
+    if (count > entry.limit) {
       return res.status(429).json({ error: 'Rate limit exceeded' });
     }
   }
@@ -156,13 +156,15 @@ const resourceCreateSchema = z.object({
   originalUrl: z.string().url(),
 });
 
-function validateBody(schema: z.ZodSchema, req: express.Request, res: express.Response, next: express.NextFunction) {
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ error: 'Invalid request body', details: parsed.error.flatten() });
-  }
-  req.body = parsed.data;
-  return next();
+function validateBody(schema: z.ZodSchema) {
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({ error: 'Invalid request body', details: parsed.error.flatten() });
+    }
+    req.body = parsed.data;
+    return next();
+  };
 }
 
 async function forwardRequest(targetBase: string, req: express.Request, res: express.Response) {
