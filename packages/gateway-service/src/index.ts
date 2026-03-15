@@ -182,6 +182,9 @@ async function forwardRequest(targetBase: string, req: express.Request, res: exp
     if (key.toLowerCase() === 'host') {
       continue;
     }
+    if (key.toLowerCase() === 'content-length') {
+      continue;
+    }
     headers.set(key, Array.isArray(value) ? value.join(',') : value);
   }
 
