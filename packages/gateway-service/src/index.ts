@@ -3,7 +3,7 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
-import Redis from 'ioredis';
+import { Redis } from 'ioredis';
 
 dotenv.config();
 
@@ -75,11 +75,15 @@ function requireAuth(req: AuthedRequest, res: express.Response, next: express.Ne
       return res.status(401).json({ error: 'Invalid token' });
     }
 
-    req.user = {
-      id: decoded.userId,
-      email: decoded.email,
-      roles: decoded.roles ?? (decoded.role ? [decoded.role] : []),
-    };
+    const roles = decoded.roles ?? (decoded.role ? [decoded.role] : []);
+    const user: AuthedRequest['user'] = { id: decoded.userId };
+    if (decoded.email) {
+      user.email = decoded.email;
+    }
+    if (roles.length > 0) {
+      user.roles = roles;
+    }
+    req.user = user;
 
     return next();
   } catch (error) {
