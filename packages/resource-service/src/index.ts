@@ -105,6 +105,7 @@ app.post('/api/v1/resources', async (req, res) => {
       originalUrl: resource.originalUrl
     });
   } catch (error) {
+    console.error('Create resource error:', error);
     res.status(500).json({ error: 'Failed to create resource' });
   }
 });
