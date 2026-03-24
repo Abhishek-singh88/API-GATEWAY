@@ -1,0 +1,15 @@
+{
+  "name": "audit-contract",
+  "version": "1.0.0",
+  "description": "Audit hash on-chain storage contract",
+  "scripts": {
+    "compile": "hardhat compile",
+    "deploy:sepolia": "hardhat run scripts/deploy.ts --network sepolia"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "hardhat": "^2.22.14",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
+  }
+}
