@@ -2,6 +2,7 @@ import { createHash } from 'crypto';
 import dotenv from 'dotenv';
 import { connect } from 'amqplib';
 import type { Channel, ConsumeMessage } from 'amqplib';
+import { ethers } from 'ethers';
 import { Pool } from 'pg';
 
 dotenv.config();
@@ -13,6 +14,9 @@ if (!connectionString) {
 
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://guest:guest@localhost:5672';
 const AUDIT_QUEUE = process.env.AUDIT_EVENTS_QUEUE || 'audit_events';
+const CHAIN_RPC_URL = process.env.CHAIN_RPC_URL || '';
+const CHAIN_PRIVATE_KEY = process.env.CHAIN_PRIVATE_KEY || '';
+const AUDIT_CONTRACT_ADDRESS = process.env.AUDIT_CONTRACT_ADDRESS || '';
 
 const databaseUrl = new URL(connectionString);
 const schema = databaseUrl.searchParams.get('schema') ?? 'public';
@@ -62,6 +66,25 @@ async function ensureTable() {
     CREATE INDEX IF NOT EXISTS auditlog_created_at_idx
     ON "${schema.replace(/"/g, '""')}"."AuditLog" (created_at DESC)
   `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS "${schema.replace(/"/g, '""')}"."AuditChainJob" (
+      id TEXT PRIMARY KEY,
+      hash TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INT NOT NULL DEFAULT 0,
+      last_error TEXT,
+      tx_hash TEXT,
+      next_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS auditchainjob_next_run_idx
+    ON "${schema.replace(/"/g, '""')}"."AuditChainJob" (status, next_run_at)
+  `);
 }
 
 function sha256(content: string): string {
@@ -99,6 +122,15 @@ async function saveEvent(event: AuditEvent) {
       event.timestamp,
     ]
   );
+
+  await pool.query(
+    `
+      INSERT INTO "${schema.replace(/"/g, '""')}"."AuditChainJob" (id, hash, status)
+      VALUES ($1, $2, 'pending')
+      ON CONFLICT (id) DO NOTHING
+    `,
+    [id, hash]
+  );
 }
 
 async function processMessage(channel: Channel, message: ConsumeMessage | null) {
@@ -119,6 +151,89 @@ async function processMessage(channel: Channel, message: ConsumeMessage | null) 
 
 async function start() {
   await ensureTable();
+
+  let chainClient: ethers.Contract | null = null;
+  if (CHAIN_RPC_URL && CHAIN_PRIVATE_KEY && AUDIT_CONTRACT_ADDRESS) {
+    const provider = new ethers.JsonRpcProvider(CHAIN_RPC_URL);
+    const wallet = new ethers.Wallet(CHAIN_PRIVATE_KEY, provider);
+    const abi = [
+      'function storeHash(bytes32 hash) external',
+      'event HashStored(bytes32 indexed hash, address indexed sender)',
+    ];
+    chainClient = new ethers.Contract(AUDIT_CONTRACT_ADDRESS, abi, wallet);
+    console.log(`Audit chain worker enabled (contract=${AUDIT_CONTRACT_ADDRESS})`);
+  } else {
+    console.log('Audit chain worker disabled (missing CHAIN_RPC_URL/CHAIN_PRIVATE_KEY/AUDIT_CONTRACT_ADDRESS)');
+  }
+
+  let workerRunning = false;
+  const runWorker = async () => {
+    if (workerRunning || !chainClient) {
+      return;
+    }
+    workerRunning = true;
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await client.query(
+        `
+          SELECT id, hash, attempts
+          FROM "${schema.replace(/"/g, '""')}"."AuditChainJob"
+          WHERE status = 'pending' AND next_run_at <= NOW()
+          ORDER BY created_at ASC
+          LIMIT 5
+          FOR UPDATE SKIP LOCKED
+        `
+      );
+
+      for (const row of result.rows) {
+        const id = row.id as string;
+        const hash = row.hash as string;
+        const attempts = Number(row.attempts ?? 0);
+        const bytes32 = hash.startsWith('0x') ? hash : `0x${hash}`;
+
+        try {
+          const tx = await chainClient.storeHash(bytes32);
+          const receipt = await tx.wait(1);
+          await client.query(
+            `
+              UPDATE "${schema.replace(/"/g, '""')}"."AuditChainJob"
+              SET status = 'confirmed', tx_hash = $2, updated_at = NOW()
+              WHERE id = $1
+            `,
+            [id, receipt?.hash ?? tx.hash]
+          );
+        } catch (error) {
+          const nextAttempts = attempts + 1;
+          const delaySec = Math.min(60 * nextAttempts, 300);
+          const status = nextAttempts >= 5 ? 'failed' : 'pending';
+          await client.query(
+            `
+              UPDATE "${schema.replace(/"/g, '""')}"."AuditChainJob"
+              SET status = $2,
+                  attempts = $3,
+                  last_error = $4,
+                  next_run_at = NOW() + ($5 || ' seconds')::interval,
+                  updated_at = NOW()
+              WHERE id = $1
+            `,
+            [id, status, nextAttempts, String(error), String(delaySec)]
+          );
+        }
+      }
+
+      await client.query('COMMIT');
+    } catch (error) {
+      await client.query('ROLLBACK');
+      console.error('Audit chain worker error:', error);
+    } finally {
+      client.release();
+      workerRunning = false;
+    }
+  };
+
+  setInterval(runWorker, 10_000);
 
   const connection = await connect(RABBITMQ_URL);
   connection.on('error', (error: unknown) => {
