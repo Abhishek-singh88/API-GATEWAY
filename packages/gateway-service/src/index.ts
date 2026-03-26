@@ -4,6 +4,9 @@ import dotenv from 'dotenv';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 import { Redis } from 'ioredis';
+import { createHash } from 'crypto';
+import { Pool } from 'pg';
+import { ethers } from 'ethers';
 
 dotenv.config();
 
@@ -14,8 +17,23 @@ const AUTH_SERVICE_URL = process.env.AUTH_SERVICE_URL || 'http://localhost:3001'
 const RESOURCE_SERVICE_URL = process.env.RESOURCE_SERVICE_URL || 'http://localhost:3002';
 const REDIS_URL = process.env.REDIS_URL || 'redis://localhost:6379';
 const JWT_SECRET = process.env.JWT_SECRET || 'changeme';
+const AUDIT_DATABASE_URL = process.env.AUDIT_DATABASE_URL || '';
+const CHAIN_RPC_URL = process.env.CHAIN_RPC_URL || '';
+const AUDIT_CONTRACT_ADDRESS = process.env.AUDIT_CONTRACT_ADDRESS || '';
 
 const redis = new Redis(REDIS_URL);
+const auditPool = AUDIT_DATABASE_URL
+  ? new Pool({ connectionString: AUDIT_DATABASE_URL })
+  : null;
+
+const chainProvider = CHAIN_RPC_URL ? new ethers.JsonRpcProvider(CHAIN_RPC_URL) : null;
+const chainContract = (chainProvider && AUDIT_CONTRACT_ADDRESS)
+  ? new ethers.Contract(
+      AUDIT_CONTRACT_ADDRESS,
+      ['function stored(bytes32 hash) view returns (bool)'],
+      chainProvider
+    )
+  : null;
 
 app.use(cors());
 app.use(express.json());
@@ -171,6 +189,26 @@ function validateBody(schema: z.ZodSchema) {
   };
 }
 
+function sha256(content: string): string {
+  return createHash('sha256').update(content).digest('hex');
+}
+
+function buildCanonicalData(input: {
+  type: string;
+  actorId: string | null;
+  service: string;
+  payload: Record<string, unknown>;
+  timestamp: string;
+}): string {
+  return JSON.stringify({
+    type: input.type,
+    actorId: input.actorId,
+    service: input.service,
+    payload: input.payload,
+    timestamp: input.timestamp,
+  });
+}
+
 async function forwardRequest(targetBase: string, req: express.Request, res: express.Response) {
   const url = new URL(req.originalUrl, targetBase);
 
@@ -211,6 +249,68 @@ async function forwardRequest(targetBase: string, req: express.Request, res: exp
 
   res.send(text);
 }
+
+app.get('/api/v1/audit/:id/verify', async (req, res) => {
+  if (!auditPool) {
+    return res.status(500).json({ error: 'AUDIT_DATABASE_URL not configured' });
+  }
+  if (!chainContract) {
+    return res.status(500).json({ error: 'CHAIN_RPC_URL or AUDIT_CONTRACT_ADDRESS not configured' });
+  }
+
+  const id = req.params.id;
+  const result = await auditPool.query(
+    `
+      SELECT id, type, actor_id, service, payload_json, hash, created_at
+      FROM "audit"."AuditLog"
+      WHERE id = $1
+      LIMIT 1
+    `,
+    [id]
+  );
+
+  if (result.rowCount === 0) {
+    return res.status(404).json({ error: 'Audit event not found' });
+  }
+
+  const row = result.rows[0];
+  const canonical = buildCanonicalData({
+    type: row.type,
+    actorId: row.actor_id,
+    service: row.service,
+    payload: row.payload_json ?? {},
+    timestamp: new Date(row.created_at).toISOString(),
+  });
+
+  const recomputedHash = sha256(canonical);
+  const dbHash = row.hash;
+  const bytes32 = dbHash.startsWith('0x') ? dbHash : `0x${dbHash}`;
+  let onChainStored: boolean | null = null;
+  try {
+    onChainStored = await chainContract.stored(bytes32);
+  } catch (error) {
+    return res.status(502).json({
+      error: 'Failed to reach blockchain RPC',
+      details: {
+        message: String(error),
+        rpc: CHAIN_RPC_URL,
+      },
+    });
+  }
+
+  const valid = (recomputedHash === dbHash) && Boolean(onChainStored);
+
+  return res.json({
+    id: row.id,
+    valid,
+    details: {
+      dbHash,
+      recomputedHash,
+      onChainStored,
+      contract: AUDIT_CONTRACT_ADDRESS,
+    }
+  });
+});
 
 // Auth routes (no auth required)
 app.post('/api/v1/auth/register', rateLimit, validateBody(registerSchema), (req, res) => {
