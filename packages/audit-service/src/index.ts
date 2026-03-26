@@ -4,6 +4,7 @@ import { connect } from 'amqplib';
 import type { Channel, ConsumeMessage } from 'amqplib';
 import { ethers } from 'ethers';
 import { Pool } from 'pg';
+import http from 'http';
 
 dotenv.config();
 
@@ -17,6 +18,7 @@ const AUDIT_QUEUE = process.env.AUDIT_EVENTS_QUEUE || 'audit_events';
 const CHAIN_RPC_URL = process.env.CHAIN_RPC_URL || '';
 const CHAIN_PRIVATE_KEY = process.env.CHAIN_PRIVATE_KEY || '';
 const AUDIT_CONTRACT_ADDRESS = process.env.AUDIT_CONTRACT_ADDRESS || '';
+const HEALTH_PORT = Number(process.env.PORT || 3004);
 
 const databaseUrl = new URL(connectionString);
 const schema = databaseUrl.searchParams.get('schema') ?? 'public';
@@ -234,6 +236,14 @@ async function start() {
   };
 
   setInterval(runWorker, 10_000);
+
+  const healthServer = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ status: 'ok', service: 'audit' }));
+  });
+  healthServer.listen(HEALTH_PORT, () => {
+    console.log(`Audit health endpoint listening on port ${HEALTH_PORT}`);
+  });
 
   const connection = await connect(RABBITMQ_URL);
   connection.on('error', (error: unknown) => {
