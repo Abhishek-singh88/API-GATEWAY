@@ -194,3 +194,5 @@ app.listen(PORT, () => {
   console.log(`Auth service on port ${PORT} (schema=${schema})`);
   void initAuditPublisher();
 });
+
+app.get('/health', (_req, res) => res.json({ status: 'ok', service: 'auth' }));
