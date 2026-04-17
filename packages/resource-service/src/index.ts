@@ -73,6 +73,10 @@ function publishAuditEvent(event: AuditEvent) {
   );
 }
 
+function buildShortUrl(shortCode: string) {
+  return `https://${shortCode}.com`;
+}
+
 // POST /api/v1/resources - Create short URL
 app.post('/api/v1/resources', async (req, res) => {
   try {
@@ -102,6 +106,7 @@ app.post('/api/v1/resources', async (req, res) => {
     res.json({
       id: resource.id,
       shortCode: resource.shortCode,
+      shortUrl: buildShortUrl(resource.shortCode),
       originalUrl: resource.originalUrl
     });
   } catch (error) {
